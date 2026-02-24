@@ -1,0 +1,10 @@
+{
+  "web": {
+    "image": "REPLACE_WITH_LIGHTSAIL_IMAGE_ARN",
+    "ports": { "5000": "HTTP" },
+    "environment": {
+      "OPENAI_API_KEY": "__OPENAI_API_KEY__",
+      "PORT": "5000"
+    }
+  }
+}

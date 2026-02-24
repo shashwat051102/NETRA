@@ -1,0 +1,9 @@
+Natural_language_task:
+  description: >
+    Convert these detected object names {detect_objects} into simple and easy-to-understand natural language
+    instructions to assist blind people in navigation. Provide clear directions based on these objects.
+
+  expected_output: >
+    The output should be a clear and concise natural language instruction that describes the location
+    or direction of the specified objects in a way that is easy for blind individuals to comprehend.
+    make sure to only give object name in the output as an natural language.

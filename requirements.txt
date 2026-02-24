@@ -1,0 +1,14 @@
+flask
+flask-socketio
+python-socketio
+opencv-python-headless
+ultralytics
+gTTS
+PyYAML
+python-dotenv
+crewai
+langchain
+langchain-openai
+openai
+numpy
+eventlet

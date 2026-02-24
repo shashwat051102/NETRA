@@ -1,0 +1,11 @@
+{
+  "containerName": "web",
+  "containerPort": 5000,
+  "healthCheck": {
+    "path": "/",
+    "intervalSeconds": 10,
+    "timeoutSeconds": 5,
+    "healthyThreshold": 2,
+    "unhealthyThreshold": 5
+  }
+}

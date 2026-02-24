@@ -1,0 +1,51 @@
+
+# Elastic Beanstalk Files
+.elasticbeanstalk/*
+!.elasticbeanstalk/*.cfg.yml
+!.elasticbeanstalk/*.global.yml
+
+# Local environment secrets
+.env
+*.env
+.env.*
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# YOLO model weights (large binary files)
+*.pt
+*.pth
+*.weights
+
+# Logs
+logs/
+*.log
+
+# YOLO inference output
+runs/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Dist / build
+dist/
+build/
+*.egg-info/
+
+# Deploy artifacts with runtime secrets
+deploy/lightsail/containers.json

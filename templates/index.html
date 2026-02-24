@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>netra</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+    <style>
+      :root{--bg:#f6f7fb;--card:#fff;--accent:#2b7cff}
+      html,body{height:100%;margin:0;font-family:Segoe UI,Roboto,Arial,sans-serif;background:var(--bg);color:#111}
+      .wrap{max-width:900px;margin:28px auto;padding:18px}
+      .row{display:flex;gap:12px}
+      .col{flex:1}
+      .center{text-align:center}
+      .card{background:var(--card);padding:12px;border-radius:8px;box-shadow:0 6px 18px rgba(0,0,0,0.06)}
+      .stream{width:100%;height:auto;background:#000;border-radius:6px}
+      .controls{display:flex;gap:8px;justify-content:center;margin:10px 0}
+      button{padding:10px 14px;border:0;border-radius:6px;cursor:pointer}
+      .btn-start{background:var(--accent);color:#fff}
+      .btn-stop{background:#e0e0e0}
+      ul{list-style:none;padding-left:0;margin:0}
+      li{padding:6px 4px;border-bottom:1px solid #f0f0f0;font-size:14px}
+      .instruction{font-size:15px;padding:8px}
+      @media(max-width:700px){.row{flex-direction:column}}
+    </style>
+  </head>
+  <body>
+    <div class="wrap">
+      <div class="center" style="margin-bottom:8px">
+        <h2 style="margin:6px 0">netra</h2>
+      </div>
+
+      <div class="card">
+        <div class="controls">
+          <button class="btn-start" onclick="startDetection()">Start</button>
+          <button class="btn-stop" onclick="stopDetection()">Stop</button>
+        </div>
+
+        <div class="row">
+          <div class="col">
+            <video id="localVideo" class="stream" autoplay muted playsinline></video>
+          </div>
+
+          <div style="width:280px">
+            <div class="card" style="margin-bottom:10px">
+              <strong>Detected</strong>
+              <ul id="objectsList"><li style="color:#888">No objects</li></ul>
+            </div>
+
+            <div class="card">
+              <strong>Instruction</strong>
+              <div id="instruction" class="instruction" style="min-height:60px;color:#222">No instruction yet</div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <audio id="audioPlayer" hidden></audio>
+    </div>
+
+    <script>
+      const socket = io();
+  let pendingAudio = false; // backwards-compat for older server behavior
+
+      socket.on('connect', ()=>console.debug('socket connected', socket.id));
+
+      socket.on('detected_objects', function(data){
+        const list = document.getElementById('objectsList');
+        if(!data.objects || data.objects.length===0){
+          list.innerHTML = '<li style="color:#888">No objects</li>';
+          return;
+        }
+        list.innerHTML = data.objects.map(o=>`<li>${o.name} ${o.confidence?('('+Math.round(o.confidence*100)+'%)'):''}${o.direction?(' — '+o.direction):''}</li>`).join('');
+      });
+
+      socket.on('navigation_instruction', function(data){
+        const inst = document.getElementById('instruction');
+        inst.textContent = data.instruction || '—';
+        const fallbackEnabled = document.getElementById('cbFallbackVoice')?.checked ?? true;
+        if(data.audio){
+          playAudio(data.audio);
+          pendingAudio = false;
+        } else {
+          pendingAudio = !!data.expect_audio;
+          // Always fallback to client TTS when server audio not included
+          if(data.instruction){ speakText(data.instruction); }
+        }
+      });
+
+      // Backwards-compat: audio may arrive separately on older server versions
+      socket.on('navigation_audio', function(data){
+        if(data && data.audio){
+          playAudio(data.audio);
+          pendingAudio = false;
+        }
+      });
+
+      let localStream = null;
+      let frameTimer = null;
+      const targetFps = 5; // send ~5 frames per second
+
+      async function startDetection(){
+        unlockAudio();
+        try{
+          // Ask for camera access
+          localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+          const video = document.getElementById('localVideo');
+          video.srcObject = localStream;
+          await video.play().catch(()=>{});
+
+          // Begin frame sending loop
+          startFrameLoop();
+        }catch(e){
+          console.error('Camera access failed', e);
+          alert('Camera access failed. Please allow camera permission.');
+        }
+        socket.emit('start_detection');
+      }
+      function stopDetection(){
+        stopFrameLoop();
+        if(localStream){
+          localStream.getTracks().forEach(t=>t.stop());
+          localStream = null;
+        }
+        socket.emit('stop_detection');
+      }
+
+      // Status updates to toggle button state
+      socket.on('status', function(data){
+        const startBtn = document.querySelector('.btn-start');
+        const stopBtn = document.querySelector('.btn-stop');
+        if(data.running){
+          startBtn.disabled = true;
+          stopBtn.disabled = false;
+        } else {
+          startBtn.disabled = false;
+          stopBtn.disabled = true;
+        }
+      });
+
+      function playAudio(base64){
+        try{
+          const a = document.getElementById('audioPlayer');
+          a.src = 'data:audio/mp3;base64,' + base64;
+          a.play().catch(()=>{});
+        }catch(e){console.warn('audio play failed',e)}
+      }
+
+      function startFrameLoop(){
+        stopFrameLoop();
+        const video = document.getElementById('localVideo');
+        const canvas = document.createElement('canvas');
+        const ctx = canvas.getContext('2d');
+        const interval = Math.max(1, Math.floor(1000/targetFps));
+        frameTimer = setInterval(()=>{
+          if(!video.videoWidth || !video.videoHeight) return;
+          // Scale down to reduce bandwidth
+          const maxW = 640;
+          const scale = Math.min(1, maxW / video.videoWidth);
+          const w = Math.round(video.videoWidth * scale);
+          const h = Math.round(video.videoHeight * scale);
+          canvas.width = w; canvas.height = h;
+          ctx.drawImage(video, 0, 0, w, h);
+          const dataUrl = canvas.toDataURL('image/jpeg', 0.6);
+          socket.emit('client_frame', { image: dataUrl });
+        }, interval);
+      }
+
+      function stopFrameLoop(){
+        if(frameTimer){
+          clearInterval(frameTimer);
+          frameTimer = null;
+        }
+      }
+
+      function speakText(text){
+        try{
+          if('speechSynthesis' in window){
+            const u = new SpeechSynthesisUtterance(text);
+            u.rate = 1.0; u.pitch = 1.0; u.lang = 'en-US';
+            window.speechSynthesis.cancel();
+            window.speechSynthesis.speak(u);
+          }
+        }catch(e){ /* noop */ }
+      }
+
+      // Unlock audio autoplay by producing a tiny inaudible sound on user click
+      function unlockAudio(){
+        try{
+          const Ctx = window.AudioContext || window.webkitAudioContext;
+          if(!Ctx) return;
+          if(!window._ac){ window._ac = new Ctx(); }
+          const ac = window._ac;
+          if(ac.state === 'suspended'){ ac.resume(); }
+          const osc = ac.createOscillator();
+          const gain = ac.createGain();
+          gain.gain.value = 0.0001;
+          osc.connect(gain).connect(ac.destination);
+          osc.start();
+          osc.stop(ac.currentTime + 0.05);
+        }catch(e){ /* ignore */ }
+      }
+    </script>
+    <div style="position:fixed;bottom:8px;right:12px;font-size:12px;color:#555;font-family:Segoe UI,Arial">
+      <label><input type="checkbox" id="cbFallbackVoice"> Instant client voice fallback</label>
+    </div>
+  </body>
+ </html>

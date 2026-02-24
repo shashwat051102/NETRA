@@ -1,0 +1,30 @@
+# Exclude secrets and local env
+.env
+
+# Git & editor
+.git/
+*.swp
+*.code-workspace
+.vscode/
+
+# Python caches
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Logs, outputs, datasets
+logs/
+runs/
+*.avi
+
+# Docker compose not needed on EB
+docker-compose.yml
+
+# Exclude large weights not used by app
+*.pt
+!Object_Detection/yolov8n.pt
+
+# Tests and notebooks (if any)
+*.ipynb
+.tests/
