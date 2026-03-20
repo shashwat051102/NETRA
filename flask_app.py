@@ -4,6 +4,7 @@ try:
     USE_EVENTLET = True
 except Exception:
     USE_EVENTLET = False
+
 from flask import Flask, render_template, Response, jsonify, request
 from flask_socketio import SocketIO, emit
 import cv2
@@ -12,23 +13,37 @@ import time
 import base64
 import os
 from Object_Detection.predict import detect_objects
-from agents.agents import NavigationAgent
-from task.task import NavigationTask
-from crewai import Crew
-from utils.Text_to_speech import text_to_speech, text_to_speech_b64
+from aurdino import ArduinoUltrasonic
+
+# Try to import AI agent features (optional)
+try:
+    from agents.agents import NavigationAgent
+    from task.task import NavigationTask
+    from crewai import Crew
+    from utils.Text_to_speech import text_to_speech, text_to_speech_b64
+    AI_ENABLED = True
+    print(" ✓ AI Navigation features loaded")
+except ImportError as e:
+    AI_ENABLED = False
+    print(f" ⚠ AI Navigation disabled due to import error: {e}")
+    # Fallback functions
+    def text_to_speech_b64(text):
+        return None
 
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'your-secret-key-here'
 socketio = SocketIO(app, cors_allowed_origins="*", async_mode=('eventlet' if USE_EVENTLET else 'threading'))
-agent_factory = NavigationAgent()
-task_factory = NavigationTask()
-crew = Crew(
 
-    agents=[agent_factory.navigation_agent()],
-
-    tasks=[task_factory.navigation_task()],
-
-)
+# Initialize AI crew if available
+if AI_ENABLED:
+    agent_factory = NavigationAgent()
+    task_factory = NavigationTask()
+    crew = Crew(
+        agents=[agent_factory.navigation_agent()],
+        tasks=[task_factory.navigation_task()],
+    )
+else:
+    crew = None
 
 camera = None
 running = False
@@ -38,6 +53,12 @@ next_instruction_ready_at = 0.0
 is_generating_instruction = False
 current_audio_thread = None
 last_detected_objects = []
+
+# Arduino ultrasonic sensor
+arduino_sensor = None
+arduino_thread = None
+arduino_running = False
+last_distance = None
 
 
 @app.route('/')
@@ -265,32 +286,43 @@ def get_instructions(detected):
             if len(objs) == 1:
                 return f"There is {objs[0]}. Please proceed with caution."
             return "Detected: " + ", ".join(objs) + ". Please proceed carefully."
+        
         result_holder = {"text": None, "error": None}
-        def _run_kickoff():
-            try:
-                res = crew.kickoff(inputs=inputs)
-                result_holder["text"] = str(res)
-            except Exception as e:
-                result_holder["error"] = e
-        kickoff_thread = threading.Thread(target=_run_kickoff, daemon=True)
-        kickoff_thread.start()
-        kickoff_thread.join(timeout=6.0)
+        
+        # Only try AI generation if crew is available
+        if AI_ENABLED and crew is not None:
+            def _run_kickoff():
+                try:
+                    res = crew.kickoff(inputs=inputs)
+                    result_holder["text"] = str(res)
+                except Exception as e:
+                    result_holder["error"] = e
+            kickoff_thread = threading.Thread(target=_run_kickoff, daemon=True)
+            kickoff_thread.start()
+            kickoff_thread.join(timeout=6.0)
+        
         if result_holder["text"] is not None:
             instruction_text = result_holder["text"]
         else:
             if result_holder["error"] is not None:
                 print(f" LLM generation failed, using simple fallback: {result_holder['error']}")
-            else:
+            elif AI_ENABLED:
                 print("⏱ LLM generation timed out, using simple fallback")
+            else:
+                print(" Using simple instruction (AI disabled)")
             instruction_text = _simple_instruction(object_info)
         print(f" Generated instruction: {instruction_text[:100]}...")
         print(" Generating audio (in-memory) to send with text...")
         audio_b64 = None
-        try:
-            audio_b64 = text_to_speech_b64(instruction_text)
-            print(f" Audio ready, size: {len(audio_b64)} chars")
-        except Exception as e:
-            print(f" Audio generation failed, sending text only: {e}")
+        if AI_ENABLED:
+            try:
+                audio_b64 = text_to_speech_b64(instruction_text)
+                if audio_b64:
+                    print(f" Audio ready, size: {len(audio_b64)} chars")
+            except Exception as e:
+                print(f" Audio generation failed, sending text only: {e}")
+        else:
+            print(" Audio generation skipped (AI disabled)")
         payload = {
             'instruction': instruction_text,
             'timestamp': time.strftime("%H:%M:%S")
@@ -349,6 +381,7 @@ def handle_disconnect():
 def handle_start():
 
     global running, last_instruction_time, is_generating_instruction, last_detected_objects, next_instruction_ready_at
+    global arduino_running, arduino_thread
 
     print('\n' + '='*60)
 
@@ -365,6 +398,14 @@ def handle_start():
     running = True
 
     print(f'   New running state: {running}')
+    
+    # Start Arduino distance monitoring.
+    # Also recover if a previous Arduino thread exited unexpectedly.
+    if (not arduino_running) or (arduino_thread is not None and not arduino_thread.is_alive()):
+        arduino_running = True
+        arduino_thread = threading.Thread(target=arduino_distance_loop, daemon=True)
+        arduino_thread.start()
+        print(' Arduino distance monitoring started')
 
     print('='*60)
 
@@ -392,11 +433,67 @@ def handle_start():
 
         print(f" Could not trigger immediate instruction: {e}")
 
+def arduino_distance_loop():
+    """Background thread to read Arduino distance every 0.5 seconds"""
+    global arduino_sensor, arduino_running, last_distance
+    
+    # Initialize Arduino
+    arduino_port = os.environ.get('ARDUINO_PORT', 'COM11')
+    arduino_sensor = ArduinoUltrasonic(port=arduino_port, baudrate=9600)
+    
+    if not arduino_sensor.connect():
+        print(" ⚠ Arduino sensor not connected. Distance monitoring disabled.")
+        socketio.emit('arduino_status', {'connected': False, 'message': 'Arduino not connected'})
+        arduino_running = False
+        return
+    
+    print(" ✓ Arduino sensor connected. Starting distance monitoring...")
+    socketio.emit('arduino_status', {'connected': True, 'message': 'Arduino connected'})
+    
+    while arduino_running:
+        try:
+            distance = arduino_sensor.read_distance()
+            
+            if distance is not None and distance > 0:
+                last_distance = distance
+                print(f" 📏 Distance: {distance:.2f} cm")
+                
+                # Check if beep needed (< 50cm)
+                should_beep = distance < 50
+                
+                socketio.emit('distance_data', {
+                    'distance': round(distance, 2),
+                    'timestamp': time.strftime("%H:%M:%S"),
+                    'beep': should_beep
+                })
+            else:
+                # Try to reconnect if disconnected
+                if not arduino_sensor.is_connected():
+                    print(" ⚠ Arduino disconnected. Attempting to reconnect...")
+                    socketio.emit('arduino_status', {'connected': False, 'message': 'Reconnecting...'})
+                    if arduino_sensor.connect():
+                        print(" ✓ Arduino reconnected")
+                        socketio.emit('arduino_status', {'connected': True, 'message': 'Reconnected'})
+            
+            # Wait 0.5 seconds before next reading (faster updates)
+            time.sleep(0.5)
+            
+        except Exception as e:
+            print(f" ✗ Error in Arduino loop: {e}")
+            import traceback
+            traceback.print_exc()
+            time.sleep(0.5)
+    
+    # Cleanup
+    if arduino_sensor:
+        arduino_sensor.close()
+    print(" ✓ Arduino distance monitoring stopped")
+
 @socketio.on('stop_detection')
 
 def handle_stop():
 
-    global running
+    global running, arduino_running
 
     print('\n' + '='*60)
 
